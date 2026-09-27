@@ -4,6 +4,7 @@
 ![Soroban SDK](https://img.shields.io/badge/soroban--sdk-22.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://github.com/SoroStream/sorostream-contracts/actions/workflows/test.yml/badge.svg)
+![Coverage](https://github.com/SoroStream/sorostream-contracts/actions/workflows/coverage.yml/badge.svg)
 
 Soroban smart contracts for **SoroStream** — a real-time payment streaming protocol on Stellar. Stream USDC by the second for salaries, subscriptions, vesting schedules, and grant disbursements.
 

@@ -29,6 +29,10 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_505_tests;
 #[cfg(test)] mod issue_506_tests;
 #[cfg(test)] mod issue_507_tests;
+// feat/41-lifecycle-integration-tests: end-to-end multi-ledger lifecycle scenarios
+#[cfg(test)] mod lifecycle_integration_tests;
+// feat/38-claimable-boundary-tests: edge cases at stream time boundaries
+#[cfg(test)] mod claimable_boundary_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
