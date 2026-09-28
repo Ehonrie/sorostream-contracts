@@ -130,6 +130,20 @@ pub fn remove_stream(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&stream_id);
 }
 
+/// Marks a stream ID as cancelled using a lightweight persistent sentinel.
+/// This allows `cancel_stream` to distinguish "already cancelled" from "never existed"
+/// and return `StreamAlreadyCancelled` on a second call.
+pub fn mark_stream_cancelled(env: &Env, stream_id: u64) {
+    let key = (Symbol::new(env, "xcl"), stream_id);
+    env.storage().persistent().set(&key, &true);
+}
+
+/// Returns true if the stream was previously cancelled (sentinel is present).
+pub fn is_stream_cancelled(env: &Env, stream_id: u64) -> bool {
+    let key = (Symbol::new(env, "xcl"), stream_id);
+    env.storage().persistent().get::<_, bool>(&key).unwrap_or(false)
+}
+
 /// Key for the monotonic event sequence number associated with a stream.
 pub fn stream_event_nonce_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
     (Symbol::new(env, "evn"), stream_id)
@@ -1835,3 +1849,30 @@ pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
 
 /// Lock-up period in seconds before an unstake request can be completed (7 days).
 pub const STAKE_UNLOCK_DELAY: u64 = 7 * 24 * 60 * 60;
+
+// ── Stream metadata blob (temporary storage) ─────────────────────────────────
+
+fn metadata_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "md"), stream_id)
+}
+
+/// Stores the metadata blob for a stream in temporary storage.
+pub fn set_stream_metadata(env: &Env, stream_id: u64, metadata: &Bytes) {
+    env.storage()
+        .temporary()
+        .set(&metadata_key(env, stream_id), metadata);
+}
+
+/// Retrieves the metadata blob for a stream from temporary storage.
+pub fn get_stream_metadata(env: &Env, stream_id: u64) -> Option<Bytes> {
+    env.storage()
+        .temporary()
+        .get(&metadata_key(env, stream_id))
+}
+
+/// Removes the metadata blob for a stream from temporary storage (called on cancellation).
+pub fn remove_stream_metadata(env: &Env, stream_id: u64) {
+    env.storage()
+        .temporary()
+        .remove(&metadata_key(env, stream_id));
+}

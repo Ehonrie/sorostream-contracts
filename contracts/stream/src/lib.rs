@@ -29,6 +29,10 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_505_tests;
 #[cfg(test)] mod issue_506_tests;
 #[cfg(test)] mod issue_507_tests;
+#[cfg(test)] mod issue_602_tests;
+#[cfg(test)] mod issue_603_tests;
+#[cfg(test)] mod issue_604_tests;
+#[cfg(test)] mod issue_605_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -54,7 +58,7 @@ use storage::{
     get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
     get_stream_tag, get_token_stream_count,
-    get_stream_metadata, set_stream_metadata,
+    get_stream_metadata, set_stream_metadata, remove_stream_metadata,
     get_treasury, get_withdrawal_cooldown, get_xlm_token,
     increment_active_stream_count, increment_batch_nonce,
     increment_sender_lifetime_count, increment_token_stream_count,
@@ -72,6 +76,7 @@ use storage::{
     read_version, record_migration, register_federation_address,
     remove_delegate, remove_fee_exempt, remove_from_blocklist,
     remove_holdback,
+    mark_stream_cancelled, is_stream_cancelled,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
     set_delegate, set_expiry_warning_window,
@@ -3338,6 +3343,12 @@ impl SoroStreamContract {
             // INTERACTIONS
             let token_client = token::Client::new(&env, &stream.token);
             if recipient_amount > 0 {
+                // Guard against recipient balance overflow (issue #603).
+                let current_balance = token_client.balance(&recipient);
+                current_balance
+                    .checked_add(recipient_amount)
+                    .ok_or(StreamError::RecipientBalanceOverflow)?;
+
                 token_client.transfer(
                     &env.current_contract_address(),
                     &recipient,
@@ -3381,12 +3392,29 @@ impl SoroStreamContract {
 
         caller.require_auth();
 
-        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        let stream = if let Some(s) = load_stream(&env, stream_id) {
+            s
+        } else {
+            // Distinguish "was cancelled" from "never existed".
+            if is_stream_cancelled(&env, stream_id) {
+                clear_reentrancy_lock(&env);
+                return Err(StreamError::StreamAlreadyCancelled);
+            }
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::StreamNotFound);
+        };
 
         let is_sender = stream.sender == caller;
         let is_delegate = Some(caller.clone()) == get_delegate(&env, stream_id);
         if !is_sender && !is_delegate {
+            clear_reentrancy_lock(&env);
             return Err(StreamError::NotAuthorized);
+        }
+
+        // Idempotency guard: if somehow the stream is still present but Cancelled.
+        if stream.status == StreamStatus::Cancelled {
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::StreamAlreadyCancelled);
         }
 
         // PendingApproval and EscrowHold streams may be cancelled freely — the sender incurs no penalty.
@@ -3396,6 +3424,7 @@ impl SoroStreamContract {
             && stream.status != StreamStatus::Active
             && stream.status != StreamStatus::Paused
         {
+            clear_reentrancy_lock(&env);
             return Err(StreamError::StreamNotActive);
         }
 
@@ -3426,12 +3455,6 @@ impl SoroStreamContract {
                 0
             };
 
-            remove_stream(&env, stream_id);
-            Self::unindex_stream(&env, &stream, stream_id);
-            if holdback_refund > 0 {
-                remove_holdback(&env, stream_id);
-            }
-
             let total_refund = refund.saturating_add(holdback_refund);
             if total_refund > 0 {
                 token::Client::new(&env, &stream.token).transfer(
@@ -3441,7 +3464,9 @@ impl SoroStreamContract {
                 );
             }
 
-            // EFFECTS: Remove stream after token transfer succeeds
+            // EFFECTS: mark cancelled sentinel then remove stream + indices atomically
+            mark_stream_cancelled(&env, stream_id);
+            remove_stream_metadata(&env, stream_id);
             remove_stream(&env, stream_id);
             unindex_by_sender(&env, &stream.sender, stream_id);
             unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -3494,6 +3519,8 @@ impl SoroStreamContract {
 
             // EFFECTS
             remove_tranches(&env, stream_id);
+            mark_stream_cancelled(&env, stream_id);
+            remove_stream_metadata(&env, stream_id);
             remove_stream(&env, stream_id);
             Self::unindex_stream(&env, &stream, stream_id);
 
@@ -3550,6 +3577,8 @@ impl SoroStreamContract {
             }
 
             // EFFECTS
+            mark_stream_cancelled(&env, stream_id);
+            remove_stream_metadata(&env, stream_id);
             remove_stream(&env, stream_id);
             Self::unindex_stream(&env, &stream, stream_id);
 
@@ -3628,7 +3657,9 @@ impl SoroStreamContract {
             0
         };
 
-        // EFFECTS: remove stream before any token transfer
+        // EFFECTS: mark cancelled, remove stream + indices before any token transfer
+        mark_stream_cancelled(&env, stream_id);
+        remove_stream_metadata(&env, stream_id);
         remove_stream(&env, stream_id);
         Self::unindex_stream(&env, &stream, stream_id);
         if holdback_refund > 0 {
@@ -3656,14 +3687,6 @@ impl SoroStreamContract {
                 &stream.sender,
                 &total_refund,
             );
-        }
-
-        // EFFECTS: Remove stream after token transfers succeed
-        remove_stream(&env, stream_id);
-        unindex_by_sender(&env, &stream.sender, stream_id);
-        unindex_by_recipient(&env, &stream.recipient, stream_id);
-        if holdback_refund > 0 {
-            remove_holdback(&env, stream_id);
         }
 
         events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, recipient_amount);

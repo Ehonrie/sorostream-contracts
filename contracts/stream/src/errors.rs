@@ -67,4 +67,8 @@ pub enum StreamError {
     CommentTooLong = 65,
     /// Sender has not staked the required minimum collateral for this token.
     InsufficientStake = 66,
+    /// `cancel_stream` was called on a stream that is already cancelled.
+    StreamAlreadyCancelled = 67,
+    /// `withdraw` would overflow the recipient's token balance.
+    RecipientBalanceOverflow = 68,
 }
