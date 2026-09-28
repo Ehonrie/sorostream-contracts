@@ -2827,8 +2827,12 @@ impl SoroStreamContract {
             // Compute fee on claimable amount.
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                // Round half-up: add half the divisor before dividing so that
+                // sub-cent amounts aren't silently swallowed by truncation.
                 available
                     .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    .checked_add(5_000)
                     .ok_or(StreamError::Overflow)?
                     / 10_000
             } else {
@@ -2924,8 +2928,12 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
                 let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                    // Round half-up: add half the divisor before dividing so that
+                    // sub-cent amounts aren't silently swallowed by truncation.
                     claimable
                         .checked_mul(fee_bps as i128)
+                        .ok_or(StreamError::Overflow)?
+                        .checked_add(5_000)
                         .ok_or(StreamError::Overflow)?
                         / 10_000
                 } else {
@@ -3120,8 +3128,12 @@ impl SoroStreamContract {
         let (recipient_amount, fee_amount) = if claimable > 0 {
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                // Round half-up: add half the divisor before dividing so that
+                // sub-cent amounts aren't silently swallowed by truncation.
                 claimable
                     .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    .checked_add(5_000)
                     .ok_or(StreamError::Overflow)?
                     / 10_000
             } else {
@@ -5918,8 +5930,12 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount) = if claimable > 0 {
                 let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                    // Round half-up: add half the divisor before dividing so that
+                    // sub-cent amounts aren't silently swallowed by truncation.
                     claimable
                         .checked_mul(fee_bps as i128)
+                        .ok_or(StreamError::Overflow)?
+                        .checked_add(5_000)
                         .ok_or(StreamError::Overflow)?
                         / 10_000
                 } else {
