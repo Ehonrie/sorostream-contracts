@@ -31,6 +31,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_507_tests;
 #[cfg(test)] mod issue_606_tests;
 #[cfg(test)] mod issue_607_tests;
+#[cfg(test)] mod issue_608_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -234,8 +235,10 @@ fn reject_reentrant_call(env: &Env) -> Result<(), StreamError> {
 
 fn refreshed_stream_view(env: &Env, mut stream: Stream) -> Stream {
     let now = env.ledger().timestamp();
+    // Use strictly-greater-than so a stream whose end_time == now (created in
+    // the same ledger) is still returned as Active, not prematurely Expired.
     if (stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed)
-        && now >= stream.end_time
+        && now > stream.end_time
     {
         stream.status = StreamStatus::Expired;
     }
