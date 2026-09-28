@@ -3290,6 +3290,11 @@ impl SoroStreamContract {
                         stream.last_withdraw_time = old_end;
                         stream.options.total_withdrawn = 0;
                         stream.options.renewals_used = stream.options.renewals_used.saturating_add(1);
+                        // #611: decrement the recurrence counter so the stream
+                        // expires after exactly N cycles instead of looping forever.
+                        if let Some(remaining) = stream.options.renew_count {
+                            stream.options.renew_count = Some(remaining.saturating_sub(1));
+                        }
                         stream.options.locked = false;
                         save_stream(&env, &stream);
 
@@ -6012,6 +6017,11 @@ impl SoroStreamContract {
                         stream.last_withdraw_time = stream.start_time;
                         stream.options.total_withdrawn = 0;
                         stream.options.renewals_used = stream.options.renewals_used.saturating_add(1);
+                        // #611: decrement the recurrence counter so the stream
+                        // expires after exactly N cycles instead of looping forever.
+                        if let Some(remaining) = stream.options.renew_count {
+                            stream.options.renew_count = Some(remaining.saturating_sub(1));
+                        }
                         save_stream(&env, &stream);
 
                         // INTERACTIONS
