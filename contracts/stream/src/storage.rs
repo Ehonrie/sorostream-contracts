@@ -1835,3 +1835,56 @@ pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
 
 /// Lock-up period in seconds before an unstake request can be completed (7 days).
 pub const STAKE_UNLOCK_DELAY: u64 = 7 * 24 * 60 * 60;
+
+// ── Stream transition history ring buffer ─────────────────────────────────────
+//
+// Each stream keeps up to MAX_TRANSITION_HISTORY lifecycle transitions stored
+// atomically as a single Vec under a per-stream key. Because Soroban storage
+// operations are all-or-nothing within a single contract invocation, reading
+// or writing this Vec is inherently atomic — there is no partial-state window.
+//
+// When the buffer is full the oldest entry (index 0) is evicted and every
+// remaining entry shifts down before the new one is appended at the tail.
+
+const MAX_TRANSITION_HISTORY: u32 = 10;
+
+fn stream_history_key(env: &Env, stream_id: u64) -> (soroban_sdk::Symbol, u64) {
+    (soroban_sdk::Symbol::new(env, "sh"), stream_id)
+}
+
+/// Atomically appends a new `StreamTransition` to the history ring buffer for
+/// `stream_id`.  If the buffer already holds `MAX_TRANSITION_HISTORY` entries
+/// the oldest entry is evicted before the new one is pushed.
+pub fn append_stream_transition(env: &Env, stream_id: u64, transition: &StreamTransition) {
+    let key = stream_history_key(env, stream_id);
+    let mut history: Vec<StreamTransition> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    // Evict the oldest entry if at capacity.
+    if history.len() >= MAX_TRANSITION_HISTORY {
+        let mut shifted: Vec<StreamTransition> = Vec::new(env);
+        for i in 1..history.len() {
+            shifted.push_back(history.get(i).unwrap());
+        }
+        history = shifted;
+    }
+
+    history.push_back(transition.clone());
+
+    // Single atomic write — either the old or the new state is visible,
+    // never a partial intermediate.
+    env.storage().persistent().set(&key, &history);
+}
+
+/// Returns the transition history for `stream_id`, oldest entry first.
+/// Returns an empty Vec if no transitions have been recorded.
+pub fn read_stream_transitions(env: &Env, stream_id: u64) -> Vec<StreamTransition> {
+    let key = stream_history_key(env, stream_id);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
