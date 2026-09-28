@@ -29,6 +29,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_505_tests;
 #[cfg(test)] mod issue_506_tests;
 #[cfg(test)] mod issue_507_tests;
+#[cfg(test)] mod issue_606_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -4756,7 +4757,10 @@ impl SoroStreamContract {
         }
         check_token_whitelist(&env, &token)?;
         validate_token_address(&env, &token)?;
-        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+        if stream.status == StreamStatus::Paused {
+            return Err(StreamError::StreamPaused);
+        }
+        if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
         }
         if amount <= 0 {
