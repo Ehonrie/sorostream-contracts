@@ -1835,3 +1835,95 @@ pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
 
 /// Lock-up period in seconds before an unstake request can be completed (7 days).
 pub const STAKE_UNLOCK_DELAY: u64 = 7 * 24 * 60 * 60;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// feat/50: Storage schema version
+//
+// A monotonically-incrementing u32 written to Instance storage at contract
+// initialisation (value: 1) and bumped by `upgrade_storage` for each
+// subsequent migration.  Entry points that read stream state check this
+// before doing any work; a mismatch means a migration is pending and the
+// call panics with `Error::StorageVersionMismatch`.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Instance-storage key for the persistent storage schema version.
+pub const STORAGE_VERSION_KEY: &str = "stor_ver";
+
+/// Current expected storage schema version.
+/// Increment this constant whenever a breaking schema change is deployed.
+pub const CURRENT_STORAGE_VERSION: u32 = 1;
+
+/// Writes the storage schema version to Instance storage.
+///
+/// Called once inside `initialize` with value [`CURRENT_STORAGE_VERSION`],
+/// and again by `upgrade_storage` whenever a migration is applied.
+pub fn write_storage_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, STORAGE_VERSION_KEY), &version);
+}
+
+/// Reads the storage schema version from Instance storage.
+///
+/// Returns `None` before the contract is initialised (legacy deployments
+/// that pre-date this feature).
+pub fn read_storage_version(env: &Env) -> Option<u32> {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, STORAGE_VERSION_KEY))
+}
+
+/// Asserts that the storage schema version matches [`CURRENT_STORAGE_VERSION`].
+///
+/// Panics with [`crate::errors::StreamError::StorageVersionMismatch`] if
+/// – the version key is absent (pre-migration deployment), or
+/// – the stored version is less than the current expected version.
+///
+/// Call this at the top of every entry point that reads stream state.
+pub fn assert_storage_version(env: &Env) -> Result<(), crate::errors::StreamError> {
+    match read_storage_version(env) {
+        Some(v) if v >= CURRENT_STORAGE_VERSION => Ok(()),
+        _ => Err(crate::errors::StreamError::StorageVersionMismatch),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// feat/45: Expired-stream Temporary storage record
+//
+// A zero-balance Cancelled or Expired stream that has been cleaned up by
+// `cleanup_expired_stream` is moved from Persistent storage to Temporary
+// storage with a short TTL (~7 days / 120,960 ledgers).  This allows
+// lightweight lookup during the grace window while keeping rent costs near
+// zero.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// TTL for cleaned-up stream tombstones in Temporary storage.
+/// 7 days at ~5 s/ledger = 7 × 24 × 3600 / 5 = 120,960 ledgers.
+pub const CLEANUP_TTL_LEDGERS: u32 = 120_960;
+
+/// Key prefix for the Temporary tombstone record of a cleaned-up stream.
+fn cleanup_tombstone_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "cln_ts"), stream_id)
+}
+
+/// Writes a cleaned-up stream record to Temporary storage and sets its TTL.
+///
+/// The value stored is a minimal tuple `(status_u32, end_time)` so callers
+/// can confirm the stream existed and when it ended without paying for the
+/// full `Stream` struct in temporary rent.
+pub fn write_cleanup_tombstone(env: &Env, stream_id: u64, status_discriminant: u32, end_time: u64) {
+    let key = cleanup_tombstone_key(env, stream_id);
+    env.storage()
+        .temporary()
+        .set(&key, &(status_discriminant, end_time));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, CLEANUP_TTL_LEDGERS, CLEANUP_TTL_LEDGERS);
+}
+
+/// Returns `true` when a cleanup tombstone exists for the given stream ID.
+pub fn has_cleanup_tombstone(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .temporary()
+        .has(&cleanup_tombstone_key(env, stream_id))
+}
