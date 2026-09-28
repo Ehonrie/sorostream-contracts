@@ -67,4 +67,6 @@ pub enum StreamError {
     CommentTooLong = 65,
     /// Sender has not staked the required minimum collateral for this token.
     InsufficientStake = 66,
+    /// `batch_withdraw` was called with more stream IDs than the maximum allowed batch size.
+    BatchSizeTooLarge = 67,
 }

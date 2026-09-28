@@ -5877,8 +5877,12 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        if stream_ids.is_empty() || stream_ids.len() > 20 {
+        const MAX_BATCH_SIZE: u32 = 50;
+        if stream_ids.is_empty() {
             return Err(StreamError::BatchLengthMismatch);
+        }
+        if stream_ids.len() > MAX_BATCH_SIZE {
+            return Err(StreamError::BatchSizeTooLarge);
         }
         recipient.require_auth();
 
