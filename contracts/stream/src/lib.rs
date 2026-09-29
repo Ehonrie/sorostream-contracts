@@ -324,6 +324,9 @@ impl SoroStreamContract {
     // Admin / lifecycle
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Initialises the contract with the super-admin address and the deployed version string.
+    ///
+    /// May only be called once; subsequent calls fail with [`StreamError::AlreadyInitialized`].
     pub fn initialize(env: Env, admin: Address, version: String) -> Result<(), StreamError> {
         if read_admin(&env).is_some() { return Err(StreamError::AlreadyInitialized); }
         write_admin(&env, &admin);
@@ -335,14 +338,17 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Returns the current super-admin address.
     pub fn get_admin(env: Env) -> Result<Address, StreamError> {
         read_admin(&env).ok_or(StreamError::NotInitialized)
     }
 
+    /// Returns the currently recorded contract version string.
     pub fn get_version(env: Env) -> Result<String, StreamError> {
         read_version(&env).ok_or(StreamError::NotInitialized)
     }
 
+    /// Transfers the super-admin role to `new_admin`. Only the current admin may call this.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), StreamError> {
         check_admin(&env);
         write_admin(&env, &new_admin);
@@ -522,6 +528,10 @@ impl SoroStreamContract {
     }
 
 
+    /// Pauses the whole contract. Only the super-admin may call this.
+    ///
+    /// The pause expires automatically after `MAX_PAUSE_DURATION` seconds; see
+    /// [`Self::is_paused`]. For the role-aware variant see `role_emergency_pause`.
     pub fn emergency_pause(env: Env) -> Result<(), StreamError> {
         check_admin(&env);
         set_paused(&env, true);
@@ -536,6 +546,9 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Lifts a contract-wide pause. Only the super-admin may call this.
+    ///
+    /// For the role-aware variant see `role_emergency_resume`.
     pub fn emergency_resume(env: Env) -> Result<(), StreamError> {
         check_admin(&env);
         set_paused(&env, false);
@@ -550,6 +563,10 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Returns `true` when the contract is currently paused.
+    ///
+    /// If the pause has passed its auto-unpause expiry this call clears the pause
+    /// as a side effect and returns `false`.
     pub fn is_paused(env: Env) -> bool { is_paused_or_auto_unpause(&env) }
 
     /// Pauses the contract. Accepts any holder of the EmergencyPause role or the super-admin.
@@ -596,16 +613,28 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Sets the guardian address that is allowed to pause the contract.
+    /// Only the super-admin may call this.
     pub fn set_guardian(env: Env, guardian: Address) -> Result<(), StreamError> {
         check_admin(&env); write_guardian(&env, &guardian); Ok(())
     }
+
+    /// Returns the guardian address, or `None` if no guardian is configured.
     pub fn get_guardian(env: Env) -> Option<Address> { read_guardian(&env) }
 
+    /// Sets the governance address that is allowed to unpause the contract.
+    /// Only the super-admin may call this.
     pub fn set_governance(env: Env, governance: Address) -> Result<(), StreamError> {
         check_admin(&env); write_governance(&env, &governance); Ok(())
     }
+
+    /// Returns the governance address, or `None` if none is configured.
     pub fn get_governance(env: Env) -> Option<Address> { read_governance(&env) }
 
+    /// Pauses the contract on behalf of the configured guardian.
+    ///
+    /// The caller must match the guardian stored via `set_guardian`, otherwise
+    /// [`StreamError::NotAuthorized`] is returned.
     pub fn pause(env: Env, guardian: Address) -> Result<(), StreamError> {
         guardian.require_auth();
         let stored = read_guardian(&env).ok_or(StreamError::NotAuthorized)?;
@@ -617,6 +646,10 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Lifts a pause on behalf of the configured governance address.
+    ///
+    /// The caller must match the governance address stored via `set_governance`,
+    /// otherwise [`StreamError::NotAuthorized`] is returned.
     pub fn unpause(env: Env, governance: Address) -> Result<(), StreamError> {
         governance.require_auth();
         let stored = read_governance(&env).ok_or(StreamError::NotAuthorized)?;
@@ -627,18 +660,29 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Returns the ledger timestamp at which the current pause auto-expires.
+    /// Returns `0` when the contract is not paused.
     pub fn get_pause_expiry(env: Env) -> u64 { get_pause_expiry(&env) }
 
+    /// Exempts `addr` from protocol fees. Only the super-admin may call this.
     pub fn add_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
         check_admin(&env); add_fee_exempt(&env, &addr); Ok(())
     }
+
+    /// Removes the fee exemption for `addr`. Only the super-admin may call this.
     pub fn remove_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
         check_admin(&env); remove_fee_exempt(&env, &addr); Ok(())
     }
+
+    /// Returns `true` when `addr` is exempt from protocol fees.
     pub fn is_fee_exempt(env: Env, addr: Address) -> bool { is_fee_exempt(&env, &addr) }
 
+    /// Returns the amount of `token` fees accumulated but not yet swept.
     pub fn get_fees_collected(env: Env, token: Address) -> i128 { get_fees_collected(&env, &token) }
 
+    /// Transfers all accumulated `token` fees to `destination` and resets the counter.
+    ///
+    /// Only the super-admin may call this. A no-op when nothing has been collected.
     pub fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError> {
         check_admin(&env);
         let amount = drain_fees_collected(&env, &token);
@@ -649,6 +693,9 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Replaces this contract's own WASM with `new_wasm_hash`. Only the super-admin may call this.
+    ///
+    /// Storage is preserved; pair with [`Self::migrate`] to move state to a new layout.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), StreamError> {
         let admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
         admin.require_auth();
@@ -656,9 +703,17 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Sets the default maximum number of concurrent streams per sender. Admin only.
+    ///
+    /// Individual senders may be given a different limit via `set_sender_stream_limit`.
     pub fn set_max_streams(env: Env, max_streams: u32) -> Result<(), StreamError> {
         check_admin(&env); set_max_streams_per_sender(&env, max_streams); Ok(())
     }
+
+    /// Overrides the concurrent stream limit for a single `sender`. Admin only.
+    ///
+    /// The override takes precedence over the protocol-wide default; a `limit` of `0`
+    /// blocks `sender` from creating any further streams.
     pub fn set_sender_stream_limit(env: Env, sender: Address, limit: u32) -> Result<(), StreamError> {
         check_admin(&env); set_sender_limit(&env, &sender, limit); Ok(())
     }
@@ -702,6 +757,7 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Returns the append-only admin audit log.
     pub fn get_admin_log(env: Env) -> Vec<AuditEntry> { read_audit_log(&env) }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -783,6 +839,10 @@ impl SoroStreamContract {
         }
     }
 
+    /// Removes a fully settled stream from storage and from all indices, reclaiming rent.
+    ///
+    /// Callable by the stream's sender or recipient. Fails with
+    /// [`StreamError::StreamNotSettled`] while any deposit is still undistributed.
     pub fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         caller.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -2313,6 +2373,7 @@ impl SoroStreamContract {
         set_expiry_warning_window(&env, window_ledgers);
         Ok(())
     }
+    /// Returns the configured expiry warning window in ledgers.
     pub fn get_expiry_warning_window(env: Env) -> u32 { get_expiry_warning_window(&env) }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2323,14 +2384,20 @@ impl SoroStreamContract {
     pub fn set_new_sender_stream_cap(env: Env, cap: u32) -> Result<(), StreamError> {
         check_admin(&env); set_new_sender_stream_cap(&env, cap); Ok(())
     }
+    /// Returns the concurrent stream cap applied to senders that are not yet promoted.
     pub fn get_new_sender_stream_cap(env: Env) -> u32 { get_new_sender_stream_cap(&env) }
 
     /// Sets the promotion threshold (lifetime stream count). Admin only.
     pub fn set_sender_promotion_threshold(env: Env, threshold: u32) -> Result<(), StreamError> {
         check_admin(&env); set_sender_promotion_threshold(&env, threshold); Ok(())
     }
+    /// Returns the lifetime stream count at which a sender is promoted.
     pub fn get_sender_promotion_threshold(env: Env) -> u32 { get_sender_promotion_threshold(&env) }
+
+    /// Returns the number of streams `sender` has ever created.
     pub fn get_sender_lifetime_count(env: Env, sender: Address) -> u32 { get_sender_lifetime_count(&env, &sender) }
+
+    /// Returns `true` when `sender` has reached the promotion threshold.
     pub fn is_sender_promoted(env: Env, sender: Address) -> bool { is_sender_promoted(&env, &sender) }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2366,6 +2433,7 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Returns the stream this stream redirects withdrawals into, or `None`.
     pub fn get_redirect(env: Env, stream_id: u64) -> Option<u64> {
         load_stream(&env, stream_id).and_then(|s| s.options.redirect_to_stream_id)
     }
@@ -4226,6 +4294,24 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Splits an active stream into exactly two new streams with explicit schedules.
+    ///
+    /// The sender supplies parallel `recipients`, `amounts`, `flow_rates` and
+    /// `end_times` vectors (each of length 2). The two amounts must sum to the
+    /// amount already claimable on the original stream, and each amount must equal
+    /// `flow_rate * (end_time - now)`; otherwise the split is rejected.
+    ///
+    /// The original stream is removed, the unearned remainder (including any
+    /// unclaimed holdback) is refunded to the sender, and the two child stream IDs
+    /// are returned in the same order as the input vectors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::ContractPaused`] while paused,
+    /// [`StreamError::BatchLengthMismatch`] for malformed vectors,
+    /// [`StreamError::NotSender`] if `sender` does not own the stream, and
+    /// [`StreamError::StreamIsLocked`] if sender controls are locked.
+    #[allow(clippy::too_many_arguments)]
     pub fn split_stream_with_schedules(
         env: Env,
         stream_id: u64,
@@ -5515,6 +5601,16 @@ impl SoroStreamContract {
         Ok(claimable)
     }
 
+    /// Returns the total amount accrued to a stream so far, ignoring prior withdrawals.
+    ///
+    /// Unlike [`Self::get_claimable`], this reports the gross accrued value: prior
+    /// withdrawals are not subtracted, the result is only capped by the deposit that
+    /// is still undistributed. The cliff, vesting curve, step-vesting tranches,
+    /// milestone release mode, and paused streams are all respected, and amounts at
+    /// or below `DUST_THRESHOLD` are reported as `0`. Streams that are neither
+    /// `Active` nor `Paused` always return `0`.
+    ///
+    /// `_recipient` is accepted for interface compatibility and is not used.
     pub fn get_accrued_balance(env: Env, stream_id: u64, _recipient: Address) -> Result<i128, StreamError> {
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
@@ -6641,6 +6737,11 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Applies the pending protocol fee change once its timelock has elapsed.
+    ///
+    /// Callable by anyone. Requires a pending proposal created via
+    /// [`Self::propose_fee_change`]; returns [`StreamError::NotAuthorized`] when none
+    /// exists and [`StreamError::StreamLocked`] while the timelock is still running.
     pub fn execute_fee_change(env: Env) -> Result<(), StreamError> {
         let (new_fee_bps, unlock_time) = read_pending_fee_proposal(&env).ok_or(StreamError::NotAuthorized)?;
 
