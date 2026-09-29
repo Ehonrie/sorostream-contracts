@@ -3115,8 +3115,12 @@ impl SoroStreamContract {
             // Compute fee on claimable amount.
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                // Round half-up: add half the divisor before dividing so that
+                // sub-cent amounts aren't silently swallowed by truncation.
                 available
                     .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    .checked_add(5_000)
                     .ok_or(StreamError::Overflow)?
                     / 10_000
             } else {
@@ -3213,8 +3217,12 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
                 let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                    // Round half-up: add half the divisor before dividing so that
+                    // sub-cent amounts aren't silently swallowed by truncation.
                     claimable
                         .checked_mul(fee_bps as i128)
+                        .ok_or(StreamError::Overflow)?
+                        .checked_add(5_000)
                         .ok_or(StreamError::Overflow)?
                         / 10_000
                 } else {
@@ -3411,8 +3419,12 @@ impl SoroStreamContract {
         let (recipient_amount, fee_amount) = if claimable > 0 {
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                // Round half-up: add half the divisor before dividing so that
+                // sub-cent amounts aren't silently swallowed by truncation.
                 claimable
                     .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    .checked_add(5_000)
                     .ok_or(StreamError::Overflow)?
                     / 10_000
             } else {
@@ -3571,6 +3583,11 @@ impl SoroStreamContract {
                         stream.last_withdraw_time = old_end;
                         stream.options.total_withdrawn = 0;
                         stream.options.renewals_used = stream.options.renewals_used.saturating_add(1);
+                        // #611: decrement the recurrence counter so the stream
+                        // expires after exactly N cycles instead of looping forever.
+                        if let Some(remaining) = stream.options.renew_count {
+                            stream.options.renew_count = Some(remaining.saturating_sub(1));
+                        }
                         stream.options.locked = false;
                         save_stream(&env, &stream);
 
@@ -6200,8 +6217,12 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        if stream_ids.is_empty() || stream_ids.len() > 20 {
+        const MAX_BATCH_SIZE: u32 = 50;
+        if stream_ids.is_empty() {
             return Err(StreamError::BatchLengthMismatch);
+        }
+        if stream_ids.len() > MAX_BATCH_SIZE {
+            return Err(StreamError::BatchSizeTooLarge);
         }
         recipient.require_auth();
 
@@ -6258,8 +6279,12 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount) = if claimable > 0 {
                 let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                    // Round half-up: add half the divisor before dividing so that
+                    // sub-cent amounts aren't silently swallowed by truncation.
                     claimable
                         .checked_mul(fee_bps as i128)
+                        .ok_or(StreamError::Overflow)?
+                        .checked_add(5_000)
                         .ok_or(StreamError::Overflow)?
                         / 10_000
                 } else {
@@ -6337,6 +6362,11 @@ impl SoroStreamContract {
                         stream.last_withdraw_time = stream.start_time;
                         stream.options.total_withdrawn = 0;
                         stream.options.renewals_used = stream.options.renewals_used.saturating_add(1);
+                        // #611: decrement the recurrence counter so the stream
+                        // expires after exactly N cycles instead of looping forever.
+                        if let Some(remaining) = stream.options.renew_count {
+                            stream.options.renew_count = Some(remaining.saturating_sub(1));
+                        }
                         save_stream(&env, &stream);
 
                         // INTERACTIONS
