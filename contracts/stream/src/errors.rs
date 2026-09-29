@@ -67,11 +67,6 @@ pub enum StreamError {
     CommentTooLong = 65,
     /// Sender has not staked the required minimum collateral for this token.
     InsufficientStake = 66,
-    /// The contract's persistent storage version does not match the expected version;
-    /// an `upgrade_storage` migration must be run before this entry point can be used.
-    StorageVersionMismatch = 67,
-    /// `cleanup_expired_stream` was called on a stream that is still active or has a
-    /// non-zero remaining balance — only zero-balance Cancelled/Expired streams can be
-    /// moved to Temporary storage.
-    StreamNotExpired = 68,
+    /// Sender has reached the configured per-sender active stream cap.
+    SenderStreamCapReached = 67,
 }

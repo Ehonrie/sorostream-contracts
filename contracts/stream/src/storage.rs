@@ -1836,94 +1836,59 @@ pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
 /// Lock-up period in seconds before an unstake request can be completed (7 days).
 pub const STAKE_UNLOCK_DELAY: u64 = 7 * 24 * 60 * 60;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// feat/50: Storage schema version
+// ── Per-sender active stream cap (feat/37-sender-stream-cap) ─────────────────
 //
-// A monotonically-incrementing u32 written to Instance storage at contract
-// initialisation (value: 1) and bumped by `upgrade_storage` for each
-// subsequent migration.  Entry points that read stream state check this
-// before doing any work; a mismatch means a migration is pending and the
-// call panics with `Error::StorageVersionMismatch`.
-// ═══════════════════════════════════════════════════════════════════════════
+// The cap limits the number of *active* streams a single sender address may
+// hold at once.  Unlike the existing `get_max_streams_per_sender` (which tracks
+// lifetime count using a global default), this cap tracks the *current active*
+// count in a dedicated persistent key and can be overridden globally by the
+// admin.  When the cap is reached, `create_stream` panics with
+// `SenderStreamCapReached`.  The count is decremented on cancellation or
+// natural expiry/completion.
 
-/// Instance-storage key for the persistent storage schema version.
-pub const STORAGE_VERSION_KEY: &str = "stor_ver";
+const SENDER_STREAM_CAP_KEY: &str = "ss_cap";
 
-/// Current expected storage schema version.
-/// Increment this constant whenever a breaking schema change is deployed.
-pub const CURRENT_STORAGE_VERSION: u32 = 1;
-
-/// Writes the storage schema version to Instance storage.
-///
-/// Called once inside `initialize` with value [`CURRENT_STORAGE_VERSION`],
-/// and again by `upgrade_storage` whenever a migration is applied.
-pub fn write_storage_version(env: &Env, version: u32) {
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, STORAGE_VERSION_KEY), &version);
+fn sender_active_count_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "sac"), sender.clone())
 }
 
-/// Reads the storage schema version from Instance storage.
-///
-/// Returns `None` before the contract is initialised (legacy deployments
-/// that pre-date this feature).
-pub fn read_storage_version(env: &Env) -> Option<u32> {
+/// Returns the global per-sender active stream cap (default 1000).
+pub fn get_sender_stream_cap(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&Symbol::new(env, STORAGE_VERSION_KEY))
+        .get(&Symbol::new(env, SENDER_STREAM_CAP_KEY))
+        .unwrap_or(1_000u32)
 }
 
-/// Asserts that the storage schema version matches [`CURRENT_STORAGE_VERSION`].
-///
-/// Panics with [`crate::errors::StreamError::StorageVersionMismatch`] if
-/// – the version key is absent (pre-migration deployment), or
-/// – the stored version is less than the current expected version.
-///
-/// Call this at the top of every entry point that reads stream state.
-pub fn assert_storage_version(env: &Env) -> Result<(), crate::errors::StreamError> {
-    match read_storage_version(env) {
-        Some(v) if v >= CURRENT_STORAGE_VERSION => Ok(()),
-        _ => Err(crate::errors::StreamError::StorageVersionMismatch),
+/// Sets the global per-sender active stream cap.  Admin-only via contract method.
+pub fn set_sender_stream_cap(env: &Env, cap: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, SENDER_STREAM_CAP_KEY), &cap);
+}
+
+/// Returns the current number of *active* streams for `sender`.
+pub fn get_sender_active_count(env: &Env, sender: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&sender_active_count_key(env, sender))
+        .unwrap_or(0u32)
+}
+
+/// Increments the active stream count for `sender` by 1.
+pub fn increment_sender_active_count(env: &Env, sender: &Address) {
+    let key = sender_active_count_key(env, sender);
+    let current = get_sender_active_count(env, sender);
+    env.storage()
+        .persistent()
+        .set(&key, &current.saturating_add(1));
+}
+
+/// Decrements the active stream count for `sender` by 1 (saturates at 0).
+pub fn decrement_sender_active_count(env: &Env, sender: &Address) {
+    let key = sender_active_count_key(env, sender);
+    let current = get_sender_active_count(env, sender);
+    if current > 0 {
+        env.storage().persistent().set(&key, &(current - 1));
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// feat/45: Expired-stream Temporary storage record
-//
-// A zero-balance Cancelled or Expired stream that has been cleaned up by
-// `cleanup_expired_stream` is moved from Persistent storage to Temporary
-// storage with a short TTL (~7 days / 120,960 ledgers).  This allows
-// lightweight lookup during the grace window while keeping rent costs near
-// zero.
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// TTL for cleaned-up stream tombstones in Temporary storage.
-/// 7 days at ~5 s/ledger = 7 × 24 × 3600 / 5 = 120,960 ledgers.
-pub const CLEANUP_TTL_LEDGERS: u32 = 120_960;
-
-/// Key prefix for the Temporary tombstone record of a cleaned-up stream.
-fn cleanup_tombstone_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "cln_ts"), stream_id)
-}
-
-/// Writes a cleaned-up stream record to Temporary storage and sets its TTL.
-///
-/// The value stored is a minimal tuple `(status_u32, end_time)` so callers
-/// can confirm the stream existed and when it ended without paying for the
-/// full `Stream` struct in temporary rent.
-pub fn write_cleanup_tombstone(env: &Env, stream_id: u64, status_discriminant: u32, end_time: u64) {
-    let key = cleanup_tombstone_key(env, stream_id);
-    env.storage()
-        .temporary()
-        .set(&key, &(status_discriminant, end_time));
-    env.storage()
-        .temporary()
-        .extend_ttl(&key, CLEANUP_TTL_LEDGERS, CLEANUP_TTL_LEDGERS);
-}
-
-/// Returns `true` when a cleanup tombstone exists for the given stream ID.
-pub fn has_cleanup_tombstone(env: &Env, stream_id: u64) -> bool {
-    env.storage()
-        .temporary()
-        .has(&cleanup_tombstone_key(env, stream_id))
 }
