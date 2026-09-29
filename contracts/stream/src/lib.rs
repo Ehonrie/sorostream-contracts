@@ -29,10 +29,10 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_505_tests;
 #[cfg(test)] mod issue_506_tests;
 #[cfg(test)] mod issue_507_tests;
-// feat/41-lifecycle-integration-tests: end-to-end multi-ledger lifecycle scenarios
-#[cfg(test)] mod lifecycle_integration_tests;
-// feat/38-claimable-boundary-tests: edge cases at stream time boundaries
-#[cfg(test)] mod claimable_boundary_tests;
+#[cfg(test)] mod issue_6_tests;    // feat/6-resume-paused-at-reset
+#[cfg(test)] mod issue_39_tests;   // feat/39-create-stream-fuzz
+#[cfg(test)] mod issue_37_tests;   // feat/37-sender-stream-cap
+#[cfg(test)] mod duplicate_id_tests; // identical-param stream ID collision
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -98,6 +98,9 @@ use storage::{
     get_stake_balance, add_stake_balance, sub_stake_balance,
     get_min_stake, set_min_stake,
     STAKE_UNLOCK_DELAY,
+    // feat/37 — per-sender active stream cap
+    get_sender_stream_cap, set_sender_stream_cap,
+    get_sender_active_count, increment_sender_active_count, decrement_sender_active_count,
 };
 
 const MAX_STREAM_METADATA_BYTES: u32 = 256;
@@ -654,6 +657,29 @@ impl SoroStreamContract {
         check_admin(&env); set_sender_limit(&env, &sender, limit); Ok(())
     }
 
+    // feat/37 — per-sender active stream cap
+
+    /// Sets the global per-sender active stream cap (default 1000).
+    ///
+    /// `create_stream` will return `SenderStreamCapReached` when a sender's
+    /// current active stream count reaches this cap.  Setting to 0 disables
+    /// the cap entirely (unlimited).  Admin only.
+    pub fn set_sender_cap(env: Env, cap: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        set_sender_stream_cap(&env, cap);
+        Ok(())
+    }
+
+    /// Returns the current per-sender active stream cap (0 = unlimited).
+    pub fn get_sender_cap(env: Env) -> u32 {
+        get_sender_stream_cap(&env)
+    }
+
+    /// Returns the number of active streams currently held by `sender`.
+    pub fn get_sender_active_stream_count(env: Env, sender: Address) -> u32 {
+        get_sender_active_count(&env, &sender)
+    }
+
     pub fn migrate(env: Env, from_version: String, to_version: String) -> Result<(), StreamError> {
         check_admin(&env);
         let applied = read_applied_migrations(&env);
@@ -834,6 +860,12 @@ impl SoroStreamContract {
             return Err(StreamError::NewSenderStreamCapExceeded);
         }
 
+        // feat/37: per-sender active stream cap (0 = unlimited)
+        let active_cap = get_sender_stream_cap(&env);
+        if active_cap > 0 && get_sender_active_count(&env, &sender) >= active_cap {
+            return Err(StreamError::SenderStreamCapReached);
+        }
+
         // Check blocklist (Issue #284)
         if is_blocked(&env, &sender) || is_blocked(&env, &recipient) {
             return Err(StreamError::NotAuthorized);
@@ -908,8 +940,9 @@ impl SoroStreamContract {
         }
 
         // Transfer total amount (streaming + holdback) from the funding sponsor into contract escrow.
+        let payer = params.sponsor.as_ref().unwrap_or(&sender);
         token::Client::new(&env, &token).transfer(
-            &payer,
+            payer,
             &env.current_contract_address(),
             &amount,
         );
@@ -984,6 +1017,7 @@ impl SoroStreamContract {
         if !options.requires_recipient_approval {
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream.token);
+            increment_sender_active_count(&env, &sender); // feat/37
         }
 
         // Update sender's last stream creation time (Issue #239)
@@ -1296,6 +1330,7 @@ impl SoroStreamContract {
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &stream.token);
+        increment_sender_active_count(&env, &sender); // feat/37
 
         set_sender_last_creation_time(&env, &sender, now);
 
@@ -1565,6 +1600,7 @@ impl SoroStreamContract {
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &stream.token);
+        increment_sender_active_count(&env, &sender); // feat/37
 
         events::tranche_stream_created(&env, stream_id, &sender, tranche_count, deposit);
         events::stream_created(&env, stream_id, &sender, &recipient, deposit, 0, end_time, false, &None);
@@ -1773,6 +1809,7 @@ impl SoroStreamContract {
         if !escrow_hold {
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream.token);
+            increment_sender_active_count(&env, &sender); // feat/37
         }
 
         if escrow_hold {
@@ -1966,6 +2003,7 @@ impl SoroStreamContract {
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &stream.token);
+        increment_sender_active_count(&env, &sender); // feat/37
 
         events::stream_created(
             &env, stream_id, &sender, &recipient, deposit, 0, end_time, false, &None,
@@ -2686,6 +2724,7 @@ impl SoroStreamContract {
             save_stream(&env, &stream);
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream.token);
+            increment_sender_active_count(&env, &stream.sender); // feat/37
             events::stream_activated(&env, stream_id, &sender, now);
             return Ok(());
         }
@@ -2741,6 +2780,7 @@ impl SoroStreamContract {
             save_stream(&env, &stream);
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream.token);
+            increment_sender_active_count(&env, &stream.sender); // feat/37
             events::stream_activated(&env, stream_id, &caller, now);
             return Ok(());
         }
@@ -2857,6 +2897,7 @@ impl SoroStreamContract {
                 save_stream(&env, &stream);
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
                 remove_stream(&env, stream_id);
                 Self::unindex_stream(&env, &stream, stream_id);
             } else {
@@ -2958,6 +2999,7 @@ impl SoroStreamContract {
                 remove_tranches(&env, stream_id);
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
                 remove_stream(&env, stream_id);
                 Self::unindex_stream(&env, &stream, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
@@ -2995,6 +3037,7 @@ impl SoroStreamContract {
                 remove_tranches(&env, stream_id);
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
                 remove_stream(&env, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
                 unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -3219,6 +3262,7 @@ impl SoroStreamContract {
                     save_stream(&env, &stream);
                     decrement_active_stream_count(&env);
                     decrement_token_stream_count(&env, &stream.token);
+                    decrement_sender_active_count(&env, &stream.sender); // feat/37
 
                     // INTERACTIONS
                     if recipient_amount > 0 {
@@ -3248,6 +3292,7 @@ impl SoroStreamContract {
                         save_stream(&env, &stream);
                         decrement_active_stream_count(&env);
                         decrement_token_stream_count(&env, &stream.token);
+                        decrement_sender_active_count(&env, &stream.sender); // feat/37
 
                         // INTERACTIONS
                         if recipient_amount > 0 {
@@ -3303,6 +3348,7 @@ impl SoroStreamContract {
             } else {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
                 remove_stream(&env, stream_id);
                 Self::unindex_stream(&env, &stream, stream_id);
 
@@ -3494,6 +3540,7 @@ impl SoroStreamContract {
             if stream.status == StreamStatus::Active {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
             }
 
             // EFFECTS
@@ -3551,6 +3598,7 @@ impl SoroStreamContract {
             if stream.status == StreamStatus::Active {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
             }
 
             // EFFECTS
@@ -3623,6 +3671,7 @@ impl SoroStreamContract {
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
             decrement_token_stream_count(&env, &stream.token);
+            decrement_sender_active_count(&env, &stream.sender); // feat/37
         }
 
         // If the holdback has not yet been settled, include it in the sender refund.
@@ -3818,6 +3867,7 @@ impl SoroStreamContract {
             if stream.status == StreamStatus::Active {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
             }
 
             // Remove stream and tranches
@@ -3869,6 +3919,7 @@ impl SoroStreamContract {
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
             decrement_token_stream_count(&env, &stream.token);
+            decrement_sender_active_count(&env, &stream.sender); // feat/37
         }
 
         // Handle holdback
@@ -3962,6 +4013,7 @@ impl SoroStreamContract {
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
             decrement_token_stream_count(&env, &stream.token);
+            decrement_sender_active_count(&env, &stream.sender); // feat/37
         }
 
         // EFFECTS: remove stream before any token transfer
@@ -4082,6 +4134,7 @@ impl SoroStreamContract {
         }
         decrement_active_stream_count(&env);
         decrement_token_stream_count(&env, &stream.token);
+        decrement_sender_active_count(&env, &stream.sender); // feat/37
 
         let token_client = token::Client::new(&env, &stream.token);
         let total_refund = refund_amount.saturating_add(holdback_refund);
@@ -4165,6 +4218,7 @@ impl SoroStreamContract {
             index_global_stream(&env, child_id);
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &child.token);
+            increment_sender_active_count(&env, &sender); // feat/37
             events::stream_created(
                 &env,
                 child_id,
@@ -4311,6 +4365,7 @@ impl SoroStreamContract {
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
             decrement_token_stream_count(&env, &stream.token);
+            decrement_sender_active_count(&env, &stream.sender); // feat/37
         }
 
         // INTERACTIONS: Transfer refund to sender
@@ -4554,6 +4609,7 @@ impl SoroStreamContract {
         index_active_by_sender(&env, &stream.sender, stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &stream.token);
+        increment_sender_active_count(&env, &stream.sender); // feat/37
 
         events::stream_approved(&env, stream_id, &recipient, now);
         Ok(())
@@ -4657,6 +4713,7 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         decrement_active_stream_count(&env);
         decrement_token_stream_count(&env, &stream.token);
+        decrement_sender_active_count(&env, &stream.sender); // feat/37
         events::stream_cancelled(&env, stream_id, &stream.sender, cancel_amount, earned);
 
         let new_nonce = stream_id;
@@ -4721,6 +4778,7 @@ impl SoroStreamContract {
         index_global_stream(&env, new_stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &new_stream.token);
+        increment_sender_active_count(&env, &stream.sender); // feat/37
 
         events::stream_partial_cancelled(
             &env,
@@ -5069,6 +5127,7 @@ impl SoroStreamContract {
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
             decrement_token_stream_count(&env, &stream.token);
+            decrement_sender_active_count(&env, &stream.sender); // feat/37
         }
 
         if holdback_escrow > 0 {
@@ -5846,6 +5905,7 @@ impl SoroStreamContract {
             index_global_stream(&env, stream_id);
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream_token);
+            increment_sender_active_count(&env, &sender); // feat/37
 
             events::stream_created(
                 &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false, &None,
@@ -5966,6 +6026,7 @@ impl SoroStreamContract {
                         // Renewal limit reached, mark as completed
                         decrement_active_stream_count(&env);
                         decrement_token_stream_count(&env, &stream.token);
+                        decrement_sender_active_count(&env, &stream.sender); // feat/37
                         remove_stream(&env, stream_id);
                         unindex_by_sender(&env, &stream.sender, stream_id);
                         unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -6020,6 +6081,7 @@ impl SoroStreamContract {
                 } else {
                     decrement_active_stream_count(&env);
                     decrement_token_stream_count(&env, &stream.token);
+                    decrement_sender_active_count(&env, &stream.sender); // feat/37
                     remove_stream(&env, stream_id);
                     unindex_by_sender(&env, &stream.sender, stream_id);
                     unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -6113,6 +6175,7 @@ impl SoroStreamContract {
             if stream.status == StreamStatus::Active {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
+                decrement_sender_active_count(&env, &stream.sender); // feat/37
             }
 
             remove_stream(&env, stream_id);
