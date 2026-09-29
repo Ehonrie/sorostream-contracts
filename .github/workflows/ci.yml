@@ -63,6 +63,20 @@ jobs:
           PROPTEST_CASES: 1000
         run: cargo test proptest_tests -- --nocapture
         timeout-minutes: 10
+      - name: feat/39 create-stream fuzz (10,000 cases, fixed seed)
+        env:
+          PROPTEST_CASES: 10000
+        run: cargo test issue_39_tests -- --nocapture
+        timeout-minutes: 15
+      - name: feat/6 resume paused-at reset tests
+        run: cargo test issue_6_tests -- --nocapture
+        timeout-minutes: 5
+      - name: feat/37 sender stream cap tests
+        run: cargo test issue_37_tests -- --nocapture
+        timeout-minutes: 5
+      - name: Duplicate stream ID collision tests
+        run: cargo test duplicate_id_tests -- --nocapture
+        timeout-minutes: 5
 
   security-audit:
     name: Security Audit
