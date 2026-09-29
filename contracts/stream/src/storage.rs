@@ -1850,29 +1850,59 @@ pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
 /// Lock-up period in seconds before an unstake request can be completed (7 days).
 pub const STAKE_UNLOCK_DELAY: u64 = 7 * 24 * 60 * 60;
 
-// ── Stream metadata blob (temporary storage) ─────────────────────────────────
+// ── Per-sender active stream cap (feat/37-sender-stream-cap) ─────────────────
+//
+// The cap limits the number of *active* streams a single sender address may
+// hold at once.  Unlike the existing `get_max_streams_per_sender` (which tracks
+// lifetime count using a global default), this cap tracks the *current active*
+// count in a dedicated persistent key and can be overridden globally by the
+// admin.  When the cap is reached, `create_stream` panics with
+// `SenderStreamCapReached`.  The count is decremented on cancellation or
+// natural expiry/completion.
 
-fn metadata_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "md"), stream_id)
+const SENDER_STREAM_CAP_KEY: &str = "ss_cap";
+
+fn sender_active_count_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "sac"), sender.clone())
 }
 
-/// Stores the metadata blob for a stream in temporary storage.
-pub fn set_stream_metadata(env: &Env, stream_id: u64, metadata: &Bytes) {
+/// Returns the global per-sender active stream cap (default 1000).
+pub fn get_sender_stream_cap(env: &Env) -> u32 {
     env.storage()
-        .temporary()
-        .set(&metadata_key(env, stream_id), metadata);
+        .instance()
+        .get(&Symbol::new(env, SENDER_STREAM_CAP_KEY))
+        .unwrap_or(1_000u32)
 }
 
-/// Retrieves the metadata blob for a stream from temporary storage.
-pub fn get_stream_metadata(env: &Env, stream_id: u64) -> Option<Bytes> {
+/// Sets the global per-sender active stream cap.  Admin-only via contract method.
+pub fn set_sender_stream_cap(env: &Env, cap: u32) {
     env.storage()
-        .temporary()
-        .get(&metadata_key(env, stream_id))
+        .instance()
+        .set(&Symbol::new(env, SENDER_STREAM_CAP_KEY), &cap);
 }
 
-/// Removes the metadata blob for a stream from temporary storage (called on cancellation).
-pub fn remove_stream_metadata(env: &Env, stream_id: u64) {
+/// Returns the current number of *active* streams for `sender`.
+pub fn get_sender_active_count(env: &Env, sender: &Address) -> u32 {
     env.storage()
-        .temporary()
-        .remove(&metadata_key(env, stream_id));
+        .persistent()
+        .get(&sender_active_count_key(env, sender))
+        .unwrap_or(0u32)
+}
+
+/// Increments the active stream count for `sender` by 1.
+pub fn increment_sender_active_count(env: &Env, sender: &Address) {
+    let key = sender_active_count_key(env, sender);
+    let current = get_sender_active_count(env, sender);
+    env.storage()
+        .persistent()
+        .set(&key, &current.saturating_add(1));
+}
+
+/// Decrements the active stream count for `sender` by 1 (saturates at 0).
+pub fn decrement_sender_active_count(env: &Env, sender: &Address) {
+    let key = sender_active_count_key(env, sender);
+    let current = get_sender_active_count(env, sender);
+    if current > 0 {
+        env.storage().persistent().set(&key, &(current - 1));
+    }
 }
