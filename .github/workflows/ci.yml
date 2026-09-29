@@ -25,6 +25,24 @@ jobs:
         run: cargo test testnet_manifest_loads -- --nocapture
       - name: Storage baseline regression
         run: cargo test --package sorostream-stream -- storage_bench::check_storage_baseline_regression --nocapture
+      - name: Storage layout snapshot tests
+        # Runs the four lifecycle snapshot tests (create / withdraw / cancel / top_up).
+        # The soroban-sdk testutils layer writes test_snapshots/test/<name>.1.json at
+        # test-end; if any committed snapshot diverges from the generated output the
+        # test binary exits non-zero and this step fails.
+        # To regenerate after an intentional schema change run locally:
+        #   UPDATE_EXPECT=true cargo test --package sorostream-stream \
+        #       -- storage_layout_snapshot_tests --nocapture
+        run: cargo test --package sorostream-stream -- storage_layout_snapshot_tests --nocapture
+      - name: Check storage snapshots are committed
+        # Fail the build if a developer ran the snapshot tests and forgot to commit
+        # the generated JSON files.  git diff --exit-code returns 1 when the working
+        # tree has unstaged changes.
+        run: |
+          git diff --exit-code contracts/stream/test_snapshots/ || \
+            (echo "::error::Storage layout snapshots changed but were not committed. \
+          Run the storage_layout_snapshot_tests locally, then git add and commit the \
+          updated test_snapshots/test/storage_snapshot_*.1.json files." && exit 1)
       - name: Build size-optimised WASM
         run: cargo build --target wasm32v1-none --profile release-size
       - name: Record WASM binary size
