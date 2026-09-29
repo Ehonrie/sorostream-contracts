@@ -242,8 +242,10 @@ fn reject_reentrant_call(env: &Env) -> Result<(), StreamError> {
 
 fn refreshed_stream_view(env: &Env, mut stream: Stream) -> Stream {
     let now = env.ledger().timestamp();
+    // Use strictly-greater-than so a stream whose end_time == now (created in
+    // the same ledger) is still returned as Active, not prematurely Expired.
     if (stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed)
-        && now >= stream.end_time
+        && now > stream.end_time
     {
         stream.status = StreamStatus::Expired;
     }
@@ -5101,7 +5103,10 @@ impl SoroStreamContract {
         }
         check_token_whitelist(&env, &token)?;
         validate_token_address(&env, &token)?;
-        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+        if stream.status == StreamStatus::Paused {
+            return Err(StreamError::StreamPaused);
+        }
+        if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
         }
         if amount <= 0 {
@@ -5393,7 +5398,49 @@ impl SoroStreamContract {
             return Err(StreamError::NotAuthorized);
         }
 
-        let holdback_escrow = if !stream.options.holdback_claimed && stream.options.holdback_amount > 0 {
+        // ── Pay recipient their earned balance first ──────────────────────────
+        // Compute how much the recipient has earned but not yet withdrawn, so
+        // they are not penalised by the issuer's clawback action.
+        let now = env.ledger().timestamp();
+        let recipient_earned = if stream.status == StreamStatus::Active
+            || stream.status == StreamStatus::Paused
+        {
+            let effective_now = if stream.status == StreamStatus::Paused {
+                stream.options.last_pause_time
+            } else {
+                now
+            };
+            if effective_now >= stream.cliff_time {
+                let earned = vesting_math::compute_earned(
+                    stream.flow_rate,
+                    effective_now,
+                    stream.end_time,
+                    stream.last_withdraw_time,
+                )
+                .unwrap_or(0);
+                let available = stream
+                    .deposit
+                    .saturating_sub(stream.options.total_withdrawn);
+                earned.min(available)
+            } else {
+                0i128
+            }
+        } else {
+            0i128
+        };
+
+        if recipient_earned > 0 {
+            token::Client::new(&env, &stream.token).transfer(
+                &env.current_contract_address(),
+                &stream.recipient,
+                &recipient_earned,
+            );
+        }
+
+        // ── Clawback only the sender's remaining balance ──────────────────────
+        let holdback_escrow = if !stream.options.holdback_claimed
+            && stream.options.holdback_amount > 0
+        {
             get_holdback(&env, stream_id)
         } else {
             0
@@ -5401,6 +5448,7 @@ impl SoroStreamContract {
         let reclaimable = stream
             .deposit
             .saturating_sub(stream.options.total_withdrawn)
+            .saturating_sub(recipient_earned)
             .saturating_add(holdback_escrow);
 
         if reclaimable > 0 {
@@ -5419,7 +5467,14 @@ impl SoroStreamContract {
         remove_stream(&env, stream_id);
         Self::unindex_stream(&env, &stream, stream_id);
 
-        events::stream_clawed_back(&env, stream_id, &stream.sender, &stream.recipient, reclaimable, &issuer);
+        events::stream_clawed_back(
+            &env,
+            stream_id,
+            &stream.sender,
+            &stream.recipient,
+            reclaimable,
+            &issuer,
+        );
         Ok(())
     }
 
